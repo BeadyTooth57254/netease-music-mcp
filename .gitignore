@@ -1,0 +1,5 @@
+node_modules/
+*.db
+netease_cookie.txt
+.env
+__pycache__/
