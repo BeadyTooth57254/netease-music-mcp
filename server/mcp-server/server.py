@@ -4,6 +4,14 @@ from http.server import HTTPServer
 
 NETEASE_COOKIE = os.environ.get("NETEASE_COOKIE", "")
 PORT = int(os.environ.get("MCP_PORT", "3456"))
+# 默认只绑本机：手机本地 / PC 本地自用时最安全。
+# 要让同一 WiFi 上的其它设备连（例如手机连 PC 上跑的这份），设 MCP_BIND=0.0.0.0。
+BIND = os.environ.get("MCP_BIND", "127.0.0.1")
+# 可选：设了 MCP_TOKEN 就要求 Authorization: Bearer <token>。
+# 不设 = 维持原来的无鉴权行为（那就请绑 127.0.0.1）。
+MCP_TOKEN = os.environ.get("MCP_TOKEN", "")
+# 可选：只在浏览器前端需要跨源访问时才设，值就是允许的源，例如 https://example.com
+ALLOWED_ORIGIN = os.environ.get("MCP_ALLOWED_ORIGIN", "")
 SESSION_ID = str(uuid.uuid4())
 
 def netease_request(url, data=None):
@@ -236,9 +244,21 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
     def _cors(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Headers', '*')
-        self.send_header('Access-Control-Allow-Methods', '*')
+        # 默认不发 CORS 头：非浏览器客户端（Operit、MCP 客户端）不需要它，
+        # 而 * 会让「任何网页」都能调这个服务。需要时用 MCP_ALLOWED_ORIGIN 指定具体来源。
+        if not ALLOWED_ORIGIN:
+            return
+        self.send_header('Access-Control-Allow-Origin', ALLOWED_ORIGIN)
+        self.send_header('Access-Control-Allow-Headers',
+                         'Content-Type, Authorization, Accept, Mcp-Session-Id')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    def _authorized(self):
+        if not MCP_TOKEN:
+            return True
+        got = (self.headers.get('Authorization') or '').strip()
+        return got == MCP_TOKEN or got == 'Bearer ' + MCP_TOKEN
+    def _unauthorized(self):
+        self._json_response({"error": "unauthorized"}, 401)
     def _json_response(self, data, status=200):
         self.send_response(status)
         self._cors()
@@ -247,6 +267,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
     def _handle_mcp(self):
+        if not self._authorized():
+            self._unauthorized()
+            return
         length = int(self.headers.get('Content-Length', 0))
         body = json.loads(self.rfile.read(length)) if length else {}
         method = body.get('method', '')
@@ -264,6 +287,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         self._json_response(result)
     def _handle_sse(self):
+        if not self._authorized():
+            self._unauthorized()
+            return
         self.send_response(200)
         self._cors()
         self.send_header('Content-Type', 'text/event-stream')
@@ -295,7 +321,9 @@ class ThreadedHTTPServer(HTTPServer):
             self.shutdown_request(request)
 
 if __name__ == '__main__':
-    print("NetEase Music MCP v2 on port " + str(PORT))
+    print("NetEase Music MCP v2 on " + BIND + ":" + str(PORT))
     print("Tools: " + str(len(TOOLS)))
-    server = ThreadedHTTPServer(('0.0.0.0', PORT), MCPHandler)
+    print("Auth: " + ("Bearer token required" if MCP_TOKEN
+                       else "none (bind to 127.0.0.1 to stay private)"))
+    server = ThreadedHTTPServer((BIND, PORT), MCPHandler)
     server.serve_forever()
