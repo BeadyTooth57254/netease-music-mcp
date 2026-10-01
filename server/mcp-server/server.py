@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import http.server, json, os, urllib.request, urllib.parse, threading, uuid, time
+import http.server, json, os, sys, urllib.request, urllib.parse, threading, uuid, time
 from http.server import HTTPServer
 
 NETEASE_COOKIE = os.environ.get("NETEASE_COOKIE", "")
@@ -12,6 +12,18 @@ BIND = os.environ.get("MCP_BIND", "127.0.0.1")
 MCP_TOKEN = os.environ.get("MCP_TOKEN", "")
 # 可选：只在浏览器前端需要跨源访问时才设，值就是允许的源，例如 https://example.com
 ALLOWED_ORIGIN = os.environ.get("MCP_ALLOWED_ORIGIN", "")
+# cookie 也可以从文件读：给「命令型 MCP 插件」用（那边通常没法设环境变量）
+if not NETEASE_COOKIE:
+    for _p in (os.path.expanduser("~/.netease_cookie"),
+               os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookie.txt")):
+        try:
+            if os.path.exists(_p):
+                _v = open(_p, encoding="utf-8").read().strip()
+                if _v:
+                    NETEASE_COOKIE = _v
+                    break
+        except Exception:
+            pass
 SESSION_ID = str(uuid.uuid4())
 
 def netease_request(url, data=None):
@@ -320,7 +332,34 @@ class ThreadedHTTPServer(HTTPServer):
         finally:
             self.shutdown_request(request)
 
+def serve_stdio():
+    """MCP over stdio：一行一个 JSON-RPC。stdout 只放协议数据，日志一律走 stderr。"""
+    print("NetEase Music MCP v2 (stdio mode)", file=sys.stderr)
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            body = json.loads(line)
+        except Exception:
+            print(json.dumps({"jsonrpc": "2.0", "id": None,
+                              "error": {"code": -32700, "message": "parse error"}}), flush=True)
+            continue
+        try:
+            result = handle_jsonrpc(body)
+        except Exception as e:
+            print(json.dumps({"jsonrpc": "2.0", "id": body.get("id") if isinstance(body, dict) else None,
+                              "error": {"code": -32603, "message": str(e)}}), flush=True)
+            continue
+        if result is None:
+            continue
+        print(json.dumps(result, ensure_ascii=False), flush=True)
+
+
 if __name__ == '__main__':
+    if '--stdio' in sys.argv:
+        serve_stdio()
+        sys.exit(0)
     print("NetEase Music MCP v2 on " + BIND + ":" + str(PORT))
     print("Tools: " + str(len(TOOLS)))
     print("Auth: " + ("Bearer token required" if MCP_TOKEN
